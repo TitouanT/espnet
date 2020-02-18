@@ -49,6 +49,8 @@ from espnet.asr.pytorch_backend.asr import CustomConverter as ASRCustomConverter
 from espnet.asr.pytorch_backend.asr import CustomEvaluator
 from espnet.asr.pytorch_backend.asr import CustomUpdater
 
+from espnet.st.pytorch_backend.ensemble import Ensemble
+
 import matplotlib
 matplotlib.use('Agg')
 
