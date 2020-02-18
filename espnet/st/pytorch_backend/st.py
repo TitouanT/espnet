@@ -406,7 +406,11 @@ def trans(args):
 
     """
     set_deterministic_pytorch(args)
-    model, train_args = load_trained_model(args.model)
+    print(args.model)
+    modellist = [load_trained_model(m) for m in args.model.split(',')]
+    model = Ensemble([m[0] for m in modellist])
+    train_args = modellist[0][1]
+    # model, train_args = load_trained_model(modelname)
     assert isinstance(model, STInterface)
     # args.ctc_weight = 0.0
     model.trans_args = args
