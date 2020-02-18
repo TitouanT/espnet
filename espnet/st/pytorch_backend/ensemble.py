@@ -5,6 +5,8 @@
 
 from espnet.nets.st_interface import STInterface
 import torch
+
+
 class Ensemble(STInterface, torch.nn.Module):
     """Ensemble model for ST task.
 
