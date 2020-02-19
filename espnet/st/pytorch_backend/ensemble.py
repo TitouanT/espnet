@@ -28,7 +28,7 @@ class Ensemble(STInterface, torch.nn.Module):
         """Construce an Ensemble object."""
         nbest_hyps = []
         for m in self.models:
-            nbest_hyps.append(m.translate(x, trans_args, char_list, rnnlm))
+            nbest_hyps.extend(m.translate(x, trans_args, char_list, rnnlm))
 
         return nbest_hyps
 
@@ -38,6 +38,6 @@ class Ensemble(STInterface, torch.nn.Module):
         for m in self.models:
             nbest_hyps.append(m.translate_batch(x, trans_args, char_list, rnnlm))
 
-        # transpose
-        nbest_hyps = map(list, list(zip(*nbest_hyps)))
+        # transpose and join the results for each element of the batch
+        nbest_hyps = [sum(x, []) for x in map(list, list(zip(*nbest_hyps)))]
         return nbest_hyps
