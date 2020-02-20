@@ -39,5 +39,5 @@ class Ensemble(STInterface, torch.nn.Module):
             nbest_hyps.append(m.translate_batch(x, trans_args, char_list, rnnlm))
 
         # transpose and join the results for each element of the batch
-        # nbest_hyps = [sum(x, []) for x in map(list, list(zip(*nbest_hyps)))]
-        return nbest_hyps[0]
+        nbest_hyps = [sum(x, []) for x in map(list, list(zip(*nbest_hyps)))]
+        return nbest_hyps
