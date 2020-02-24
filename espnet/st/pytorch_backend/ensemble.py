@@ -5,6 +5,7 @@
 
 from espnet.nets.st_interface import STInterface
 import torch
+from espnet.nets.pytorch_backend.rnn.decoders import BeamSearch
 
 
 class Ensemble(STInterface, torch.nn.Module):
@@ -26,9 +27,12 @@ class Ensemble(STInterface, torch.nn.Module):
 
     def translate(self, x, trans_args, char_list=None, rnnlm=None):
         """Construct an Ensemble object."""
-        nbest_hyps = []
-        for m in self.models:
-            nbest_hyps.extend(m.translate(x, trans_args, char_list, rnnlm))
+        beam_search = BeamSearch([m.dec for m in self.models])
+        hs = [m.encode(x) for m in self.models]
+        nbest_hyps = beam_search.recognize_beam(x, trans_args, char_list, rnnlm)
+        # def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
+        # for m in self.models:
+        #     nbest_hyps.extend(m.translate(x, trans_args, char_list, rnnlm))
 
         return nbest_hyps
 

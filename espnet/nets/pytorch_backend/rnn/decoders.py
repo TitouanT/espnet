@@ -256,6 +256,252 @@ class Decoder(torch.nn.Module, ScorerInterface):
 
         return self.loss, acc, ppl
 
+    def step_decode(self, vy, h, z_prev, c_prev, a_prev):
+        # att_c_list, att_w_list
+        ey = self.dropout_emb(self.embed(vy))  # utt list (1) x zdim
+        if self.num_encs == 1:
+            att_c, att_w = self.att[att_idx](
+                h[0].unsqueeze(0),
+                [h[0].size(0)],
+                self.dropout_dec[0](z_prev[0]),
+                a_prev
+            )
+        else:
+            for idx in range(self.num_encs):
+                att_c_list[idx], att_w_list[idx] = self.att[idx](
+                    h[idx].unsqueeze(0),
+                    [h[idx].size(0)],
+                    self.dropout_dec[0](z_prev[0]),
+                    a_prev[idx]
+                )
+            h_han = torch.stack(att_c_list, dim=1)
+            att_c, att_w_list[self.num_encs] = self.att[self.num_encs](
+                h_han,
+                [self.num_encs],
+                self.dropout_dec[0](z_prev[0]),
+                a_prev[self.num_encs]
+            )
+        ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
+        z_list, c_list = self.rnn_forward(ey, z_list, c_list, z_prev, c_prev)
+
+        # get nbest local scores and their ids
+        if self.context_residual:
+            logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
+        else:
+            logits = self.output(self.dropout_dec[-1](z_list[-1]))
+        return logits
+
+    def step_decode_batch(self, step, statestuff):
+        return statestuff
+
+    def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
+        bm = BeamSearch(self)
+        return bm.recognize_beam(h, lpz, reco_args, char_list, rnnlm, strm_idx)
+
+    def recognize_beam_batch(self, h, hlens, lpz, recog_args, char_list, rnnlm=None,
+                             normalize_score=True, strm_idx=0, lang_ids=None):
+        bm = BeamSearch(self)
+        return bm.recognize_beam_batch(
+            h, hlens, lpz, recog_args, char_list,
+            rnnlm, normalize_score, strm_idx, lang_ids
+        )
+
+    def calculate_all_attentions(self, hs_pad, hlen, ys_pad, strm_idx=0, lang_ids=None):
+        """Calculate all of attentions
+
+            :param torch.Tensor hs_pad: batch of padded hidden state sequences (B, Tmax, D)
+                                        [in multi-encoder case,
+                                        list of torch.Tensor, [(B, Tmax_1, D), (B, Tmax_2, D), ..., ] ]
+            :param torch.Tensor hlen: batch of lengths of hidden state sequences (B)
+                                        [in multi-encoder case, list of torch.Tensor, [(B), (B), ..., ]
+            :param torch.Tensor ys_pad: batch of padded character id sequence tensor (B, Lmax)
+            :param int strm_idx: stream index for parallel speaker attention in multi-speaker case
+            :param torch.Tensor lang_ids: batch of target language id tensor (B, 1)
+            :return: attention weights with the following shape,
+                1) multi-head case => attention weights (B, H, Lmax, Tmax),
+                2) multi-encoder case => [(B, Lmax, Tmax1), (B, Lmax, Tmax2), ..., (B, Lmax, NumEncs)]
+                3) other case => attention weights (B, Lmax, Tmax).
+            :rtype: float ndarray
+        """
+        # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
+        if self.num_encs == 1:
+            hs_pad = [hs_pad]
+            hlen = [hlen]
+
+        # TODO(kan-bayashi): need to make more smart way
+        ys = [y[y != self.ignore_id] for y in ys_pad]  # parse padded ys
+        att_idx = min(strm_idx, len(self.att) - 1)
+
+        # hlen should be list of list of integer
+        hlen = [list(map(int, hlen[idx])) for idx in range(self.num_encs)]
+
+        self.loss = None
+        # prepare input and output word sequences with sos/eos IDs
+        eos = ys[0].new([self.eos])
+        sos = ys[0].new([self.sos])
+        if self.replace_sos:
+            ys_in = [torch.cat([idx, y], dim=0) for idx, y in zip(lang_ids, ys)]
+        else:
+            ys_in = [torch.cat([sos, y], dim=0) for y in ys]
+        ys_out = [torch.cat([y, eos], dim=0) for y in ys]
+
+        # padding for ys with -1
+        # pys: utt x olen
+        ys_in_pad = pad_list(ys_in, self.eos)
+        ys_out_pad = pad_list(ys_out, self.ignore_id)
+
+        # get length info
+        olength = ys_out_pad.size(1)
+
+        # initialization
+        c_list = [self.zero_state(hs_pad[0])]
+        z_list = [self.zero_state(hs_pad[0])]
+        for _ in six.moves.range(1, self.dlayers):
+            c_list.append(self.zero_state(hs_pad[0]))
+            z_list.append(self.zero_state(hs_pad[0]))
+        att_ws = []
+        if self.num_encs == 1:
+            att_w = None
+            self.att[att_idx].reset()  # reset pre-computation of h
+        else:
+            att_w_list = [None] * (self.num_encs + 1)  # atts + han
+            att_c_list = [None] * (self.num_encs)  # atts
+            for idx in range(self.num_encs + 1):
+                self.att[idx].reset()  # reset pre-computation of h in atts and han
+
+        # pre-computation of embedding
+        eys = self.dropout_emb(self.embed(ys_in_pad))  # utt x olen x zdim
+
+        # loop for an output sequence
+        for i in six.moves.range(olength):
+            if self.num_encs == 1:
+                att_c, att_w = self.att[att_idx](hs_pad[0], hlen[0], self.dropout_dec[0](z_list[0]), att_w)
+                att_ws.append(att_w)
+            else:
+                for idx in range(self.num_encs):
+                    att_c_list[idx], att_w_list[idx] = self.att[idx](hs_pad[idx], hlen[idx],
+                                                                     self.dropout_dec[0](z_list[0]), att_w_list[idx])
+                hs_pad_han = torch.stack(att_c_list, dim=1)
+                hlen_han = [self.num_encs] * len(ys_in)
+                att_c, att_w_list[self.num_encs] = self.att[self.num_encs](hs_pad_han, hlen_han,
+                                                                           self.dropout_dec[0](z_list[0]),
+                                                                           att_w_list[self.num_encs])
+                att_ws.append(att_w_list)
+            ey = torch.cat((eys[:, i, :], att_c), dim=1)  # utt x (zdim + hdim)
+            z_list, c_list = self.rnn_forward(ey, z_list, c_list, z_list, c_list)
+
+        if self.num_encs == 1:
+            # convert to numpy array with the shape (B, Lmax, Tmax)
+            att_ws = att_to_numpy(att_ws, self.att[att_idx])
+        else:
+            _att_ws = []
+            for idx, ws in enumerate(zip(*att_ws)):
+                ws = att_to_numpy(ws, self.att[idx])
+                _att_ws.append(ws)
+            att_ws = _att_ws
+        return att_ws
+
+    @staticmethod
+    def _get_last_yseq(exp_yseq):
+        last = []
+        for y_seq in exp_yseq:
+            last.append(y_seq[-1])
+        return last
+
+    @staticmethod
+    def _append_ids(yseq, ids):
+        if isinstance(ids, list):
+            for i, j in enumerate(ids):
+                yseq[i].append(j)
+        else:
+            for i in range(len(yseq)):
+                yseq[i].append(ids)
+        return yseq
+
+    @staticmethod
+    def _index_select_list(yseq, lst):
+        new_yseq = []
+        for l in lst:
+            new_yseq.append(yseq[l][:])
+        return new_yseq
+
+    @staticmethod
+    def _index_select_lm_state(rnnlm_state, dim, vidx):
+        if isinstance(rnnlm_state, dict):
+            new_state = {}
+            for k, v in rnnlm_state.items():
+                new_state[k] = [torch.index_select(vi, dim, vidx) for vi in v]
+        elif isinstance(rnnlm_state, list):
+            new_state = []
+            for i in vidx:
+                new_state.append(rnnlm_state[int(i)][:])
+        return new_state
+
+    # scorer interface methods
+    def init_state(self, x):
+        # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
+        if self.num_encs == 1:
+            x = [x]
+
+        c_list = [self.zero_state(x[0].unsqueeze(0))]
+        z_list = [self.zero_state(x[0].unsqueeze(0))]
+        for _ in six.moves.range(1, self.dlayers):
+            c_list.append(self.zero_state(x[0].unsqueeze(0)))
+            z_list.append(self.zero_state(x[0].unsqueeze(0)))
+        # TODO(karita): support strm_index for `asr_mix`
+        strm_index = 0
+        att_idx = min(strm_index, len(self.att) - 1)
+        if self.num_encs == 1:
+            a = None
+            self.att[att_idx].reset()  # reset pre-computation of h
+        else:
+            a = [None] * (self.num_encs + 1)  # atts + han
+            for idx in range(self.num_encs + 1):
+                self.att[idx].reset()  # reset pre-computation of h in atts and han
+        return dict(c_prev=c_list[:], z_prev=z_list[:], a_prev=a, workspace=(att_idx, z_list, c_list))
+
+    def score(self, yseq, state, x):
+        # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
+        if self.num_encs == 1:
+            x = [x]
+
+        att_idx, z_list, c_list = state["workspace"]
+        vy = yseq[-1].unsqueeze(0)
+        ey = self.dropout_emb(self.embed(vy))  # utt list (1) x zdim
+        if self.num_encs == 1:
+            att_c, att_w = self.att[att_idx](
+                x[0].unsqueeze(0), [x[0].size(0)],
+                self.dropout_dec[0](state['z_prev'][0]), state['a_prev'])
+        else:
+            att_w = [None] * (self.num_encs + 1)  # atts + han
+            att_c_list = [None] * (self.num_encs)  # atts
+            for idx in range(self.num_encs):
+                att_c_list[idx], att_w[idx] = self.att[idx](x[idx].unsqueeze(0), [x[idx].size(0)],
+                                                            self.dropout_dec[0](state['z_prev'][0]),
+                                                            state['a_prev'][idx])
+            h_han = torch.stack(att_c_list, dim=1)
+            att_c, att_w[self.num_encs] = self.att[self.num_encs](h_han, [self.num_encs],
+                                                                  self.dropout_dec[0](state['z_prev'][0]),
+                                                                  state['a_prev'][self.num_encs])
+        ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
+        z_list, c_list = self.rnn_forward(ey, z_list, c_list, state['z_prev'], state['c_prev'])
+        if self.context_residual:
+            logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
+        else:
+            logits = self.output(self.dropout_dec[-1](z_list[-1]))
+        logp = F.log_softmax(logits, dim=1).squeeze(0)
+        return logp, dict(c_prev=c_list[:], z_prev=z_list[:], a_prev=att_w, workspace=(att_idx, z_list, c_list))
+
+class BeamSearch:
+    """BeamSearch module
+
+    handle all the state of a beam search
+    # :param int eprojs: encoder projection units
+    """
+
+    def __init__(self, decoder):
+        self.dec = decoder
+
     def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
         """beam search implementation
 
@@ -270,6 +516,7 @@ class Decoder(torch.nn.Module, ScorerInterface):
         :return: N-best decoding results
         :rtype: list of dicts
         """
+        dec = self.dec
         # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
         if self.num_encs == 1:
             h = [h]
@@ -325,6 +572,7 @@ class Decoder(torch.nn.Module, ScorerInterface):
         logging.info('max output length: ' + str(maxlen))
         logging.info('min output length: ' + str(minlen))
 
+        # real beam stuff
         # initialize hypothesis
         if rnnlm:
             hyp = {'score': 0.0, 'yseq': [y], 'c_prev': c_list,
@@ -349,31 +597,28 @@ class Decoder(torch.nn.Module, ScorerInterface):
 
             hyps_best_kept = []
             for hyp in hyps:
-                vy.unsqueeze(1)
                 vy[0] = hyp['yseq'][i]
-                ey = self.dropout_emb(self.embed(vy))  # utt list (1) x zdim
-                ey.unsqueeze(0)
-                if self.num_encs == 1:
-                    att_c, att_w = self.att[att_idx](h[0].unsqueeze(0), [h[0].size(0)],
-                                                     self.dropout_dec[0](hyp['z_prev'][0]), hyp['a_prev'])
-                else:
-                    for idx in range(self.num_encs):
-                        att_c_list[idx], att_w_list[idx] = self.att[idx](h[idx].unsqueeze(0), [h[idx].size(0)],
-                                                                         self.dropout_dec[0](hyp['z_prev'][0]),
-                                                                         hyp['a_prev'][idx])
-                    h_han = torch.stack(att_c_list, dim=1)
-                    att_c, att_w_list[self.num_encs] = self.att[self.num_encs](h_han, [self.num_encs],
-                                                                               self.dropout_dec[0](hyp['z_prev'][0]),
-                                                                               hyp['a_prev'][self.num_encs])
-                ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
-                z_list, c_list = self.rnn_forward(ey, z_list, c_list, hyp['z_prev'], hyp['c_prev'])
+                # else:
+                #     for idx in range(self.num_encs):
+                #         att_c_list[idx], att_w_list[idx] = self.att[idx](h[idx].unsqueeze(0), [h[idx].size(0)],
+                #                                                          self.dropout_dec[0](hyp['z_prev'][0]),
+                #                                                          hyp['a_prev'][idx])
+                #     h_han = torch.stack(att_c_list, dim=1)
+                #     att_c, att_w_list[self.num_encs] = self.att[self.num_encs](h_han, [self.num_encs],
+                #                                                                self.dropout_dec[0](hyp['z_prev'][0]),
+                #                                                                hyp['a_prev'][self.num_encs])
+                # ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
+                # z_list, c_list = self.rnn_forward(ey, z_list, c_list, hyp['z_prev'], hyp['c_prev'])
 
-                # get nbest local scores and their ids
-                if self.context_residual:
-                    logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
-                else:
-                    logits = self.output(self.dropout_dec[-1](z_list[-1]))
+                # # get nbest local scores and their ids
+                # if self.context_residual:
+                #     logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
+                # else:
+                #     logits = self.output(self.dropout_dec[-1](z_list[-1]))
+                # local_att_scores = F.log_softmax(logits, dim=1)
+                logits = self.dec.step_decode(vy, h, hyp['z_prev'], hyp['c_prev'], hyp['a_prev'])
                 local_att_scores = F.log_softmax(logits, dim=1)
+
                 if rnnlm:
                     rnnlm_state, local_lm_scores = rnnlm.predict(hyp['rnnlm_prev'], vy)
                     local_scores = local_att_scores + recog_args.lm_weight * local_lm_scores
@@ -717,191 +962,6 @@ class Decoder(torch.nn.Module, ScorerInterface):
 
         return nbest_hyps
 
-    def calculate_all_attentions(self, hs_pad, hlen, ys_pad, strm_idx=0, lang_ids=None):
-        """Calculate all of attentions
-
-            :param torch.Tensor hs_pad: batch of padded hidden state sequences (B, Tmax, D)
-                                        [in multi-encoder case,
-                                        list of torch.Tensor, [(B, Tmax_1, D), (B, Tmax_2, D), ..., ] ]
-            :param torch.Tensor hlen: batch of lengths of hidden state sequences (B)
-                                        [in multi-encoder case, list of torch.Tensor, [(B), (B), ..., ]
-            :param torch.Tensor ys_pad: batch of padded character id sequence tensor (B, Lmax)
-            :param int strm_idx: stream index for parallel speaker attention in multi-speaker case
-            :param torch.Tensor lang_ids: batch of target language id tensor (B, 1)
-            :return: attention weights with the following shape,
-                1) multi-head case => attention weights (B, H, Lmax, Tmax),
-                2) multi-encoder case => [(B, Lmax, Tmax1), (B, Lmax, Tmax2), ..., (B, Lmax, NumEncs)]
-                3) other case => attention weights (B, Lmax, Tmax).
-            :rtype: float ndarray
-        """
-        # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
-        if self.num_encs == 1:
-            hs_pad = [hs_pad]
-            hlen = [hlen]
-
-        # TODO(kan-bayashi): need to make more smart way
-        ys = [y[y != self.ignore_id] for y in ys_pad]  # parse padded ys
-        att_idx = min(strm_idx, len(self.att) - 1)
-
-        # hlen should be list of list of integer
-        hlen = [list(map(int, hlen[idx])) for idx in range(self.num_encs)]
-
-        self.loss = None
-        # prepare input and output word sequences with sos/eos IDs
-        eos = ys[0].new([self.eos])
-        sos = ys[0].new([self.sos])
-        if self.replace_sos:
-            ys_in = [torch.cat([idx, y], dim=0) for idx, y in zip(lang_ids, ys)]
-        else:
-            ys_in = [torch.cat([sos, y], dim=0) for y in ys]
-        ys_out = [torch.cat([y, eos], dim=0) for y in ys]
-
-        # padding for ys with -1
-        # pys: utt x olen
-        ys_in_pad = pad_list(ys_in, self.eos)
-        ys_out_pad = pad_list(ys_out, self.ignore_id)
-
-        # get length info
-        olength = ys_out_pad.size(1)
-
-        # initialization
-        c_list = [self.zero_state(hs_pad[0])]
-        z_list = [self.zero_state(hs_pad[0])]
-        for _ in six.moves.range(1, self.dlayers):
-            c_list.append(self.zero_state(hs_pad[0]))
-            z_list.append(self.zero_state(hs_pad[0]))
-        att_ws = []
-        if self.num_encs == 1:
-            att_w = None
-            self.att[att_idx].reset()  # reset pre-computation of h
-        else:
-            att_w_list = [None] * (self.num_encs + 1)  # atts + han
-            att_c_list = [None] * (self.num_encs)  # atts
-            for idx in range(self.num_encs + 1):
-                self.att[idx].reset()  # reset pre-computation of h in atts and han
-
-        # pre-computation of embedding
-        eys = self.dropout_emb(self.embed(ys_in_pad))  # utt x olen x zdim
-
-        # loop for an output sequence
-        for i in six.moves.range(olength):
-            if self.num_encs == 1:
-                att_c, att_w = self.att[att_idx](hs_pad[0], hlen[0], self.dropout_dec[0](z_list[0]), att_w)
-                att_ws.append(att_w)
-            else:
-                for idx in range(self.num_encs):
-                    att_c_list[idx], att_w_list[idx] = self.att[idx](hs_pad[idx], hlen[idx],
-                                                                     self.dropout_dec[0](z_list[0]), att_w_list[idx])
-                hs_pad_han = torch.stack(att_c_list, dim=1)
-                hlen_han = [self.num_encs] * len(ys_in)
-                att_c, att_w_list[self.num_encs] = self.att[self.num_encs](hs_pad_han, hlen_han,
-                                                                           self.dropout_dec[0](z_list[0]),
-                                                                           att_w_list[self.num_encs])
-                att_ws.append(att_w_list)
-            ey = torch.cat((eys[:, i, :], att_c), dim=1)  # utt x (zdim + hdim)
-            z_list, c_list = self.rnn_forward(ey, z_list, c_list, z_list, c_list)
-
-        if self.num_encs == 1:
-            # convert to numpy array with the shape (B, Lmax, Tmax)
-            att_ws = att_to_numpy(att_ws, self.att[att_idx])
-        else:
-            _att_ws = []
-            for idx, ws in enumerate(zip(*att_ws)):
-                ws = att_to_numpy(ws, self.att[idx])
-                _att_ws.append(ws)
-            att_ws = _att_ws
-        return att_ws
-
-    @staticmethod
-    def _get_last_yseq(exp_yseq):
-        last = []
-        for y_seq in exp_yseq:
-            last.append(y_seq[-1])
-        return last
-
-    @staticmethod
-    def _append_ids(yseq, ids):
-        if isinstance(ids, list):
-            for i, j in enumerate(ids):
-                yseq[i].append(j)
-        else:
-            for i in range(len(yseq)):
-                yseq[i].append(ids)
-        return yseq
-
-    @staticmethod
-    def _index_select_list(yseq, lst):
-        new_yseq = []
-        for l in lst:
-            new_yseq.append(yseq[l][:])
-        return new_yseq
-
-    @staticmethod
-    def _index_select_lm_state(rnnlm_state, dim, vidx):
-        if isinstance(rnnlm_state, dict):
-            new_state = {}
-            for k, v in rnnlm_state.items():
-                new_state[k] = [torch.index_select(vi, dim, vidx) for vi in v]
-        elif isinstance(rnnlm_state, list):
-            new_state = []
-            for i in vidx:
-                new_state.append(rnnlm_state[int(i)][:])
-        return new_state
-
-    # scorer interface methods
-    def init_state(self, x):
-        # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
-        if self.num_encs == 1:
-            x = [x]
-
-        c_list = [self.zero_state(x[0].unsqueeze(0))]
-        z_list = [self.zero_state(x[0].unsqueeze(0))]
-        for _ in six.moves.range(1, self.dlayers):
-            c_list.append(self.zero_state(x[0].unsqueeze(0)))
-            z_list.append(self.zero_state(x[0].unsqueeze(0)))
-        # TODO(karita): support strm_index for `asr_mix`
-        strm_index = 0
-        att_idx = min(strm_index, len(self.att) - 1)
-        if self.num_encs == 1:
-            a = None
-            self.att[att_idx].reset()  # reset pre-computation of h
-        else:
-            a = [None] * (self.num_encs + 1)  # atts + han
-            for idx in range(self.num_encs + 1):
-                self.att[idx].reset()  # reset pre-computation of h in atts and han
-        return dict(c_prev=c_list[:], z_prev=z_list[:], a_prev=a, workspace=(att_idx, z_list, c_list))
-
-    def score(self, yseq, state, x):
-        # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
-        if self.num_encs == 1:
-            x = [x]
-
-        att_idx, z_list, c_list = state["workspace"]
-        vy = yseq[-1].unsqueeze(0)
-        ey = self.dropout_emb(self.embed(vy))  # utt list (1) x zdim
-        if self.num_encs == 1:
-            att_c, att_w = self.att[att_idx](
-                x[0].unsqueeze(0), [x[0].size(0)],
-                self.dropout_dec[0](state['z_prev'][0]), state['a_prev'])
-        else:
-            att_w = [None] * (self.num_encs + 1)  # atts + han
-            att_c_list = [None] * (self.num_encs)  # atts
-            for idx in range(self.num_encs):
-                att_c_list[idx], att_w[idx] = self.att[idx](x[idx].unsqueeze(0), [x[idx].size(0)],
-                                                            self.dropout_dec[0](state['z_prev'][0]),
-                                                            state['a_prev'][idx])
-            h_han = torch.stack(att_c_list, dim=1)
-            att_c, att_w[self.num_encs] = self.att[self.num_encs](h_han, [self.num_encs],
-                                                                  self.dropout_dec[0](state['z_prev'][0]),
-                                                                  state['a_prev'][self.num_encs])
-        ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
-        z_list, c_list = self.rnn_forward(ey, z_list, c_list, state['z_prev'], state['c_prev'])
-        if self.context_residual:
-            logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
-        else:
-            logits = self.output(self.dropout_dec[-1](z_list[-1]))
-        logp = F.log_softmax(logits, dim=1).squeeze(0)
-        return logp, dict(c_prev=c_list[:], z_prev=z_list[:], a_prev=att_w, workspace=(att_idx, z_list, c_list))
 
 
 def decoder_for(args, odim, sos, eos, att, labeldist):
