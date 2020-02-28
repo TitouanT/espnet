@@ -35,10 +35,11 @@ from espnet.nets.pytorch_backend.nets_utils import pad_list
 from espnet.nets.pytorch_backend.nets_utils import to_device
 from espnet.nets.pytorch_backend.nets_utils import to_torch_tensor
 from espnet.nets.pytorch_backend.rnn.attentions import att_for
+from espnet.nets.pytorch_backend.rnn.beamsearch import BeamableModel
+from espnet.nets.pytorch_backend.rnn.beamsearch import BeaSearch
 from espnet.nets.pytorch_backend.rnn.decoders import decoder_for
 from espnet.nets.pytorch_backend.rnn.encoders import encoder_for
 from espnet.nets.st_interface import STInterface
-from espnet.nets.pytorch_backend.rnn.beamsearch import BeamableModel
 
 CTC_LOSS_THRESHOLD = 10000
 
@@ -471,7 +472,6 @@ class E2E(STInterface, BeamableModel, torch.nn.Module):
         :return: N-best decoding results
         :rtype: list
         """
-        hs = self.encode(x).unsqueeze(0)
         lpz = None
 
         # 2. Decoder
@@ -481,12 +481,15 @@ class E2E(STInterface, BeamableModel, torch.nn.Module):
         return y
 
     def encode_for_beam(self, x):
+        """Return the projection h of x to start decoding."""
         return self.encode(x).unsqueeze(0)[0]
 
     def initial_decoding_state(self, h):
+        """Give the state to start a new decoding."""
         return self.dec.initial_decoding_state(h)
 
     def decode_from_state(self, state, h, vy):
+        """Advance one step the decoding of h from state, vy is the last decoded element."""
         return self.dec.decode_from_state(state, h, vy)
 
     def translate_batch(self, xs, trans_args, char_list, rnnlm=None):
