@@ -1,3 +1,5 @@
+"""BeamSearch module."""
+
 import logging
 import numpy as np
 import six
@@ -10,7 +12,7 @@ CTC_SCORING_RATIO = 1.5
 
 
 def find_first_tensor(list_of_tensor_or_tensor):
-    """Finds the first tensor in a tree."""
+    """Find the first tensor in a tree."""
     t = type(list_of_tensor_or_tensor)
     if t is torch.Tensor:
         return list_of_tensor_or_tensor
@@ -20,7 +22,7 @@ def find_first_tensor(list_of_tensor_or_tensor):
 
 
 def find_all_tensors(l):
-    """Finds all the tensors in a tree."""
+    """Find all the tensors in a tree."""
     t = type(l)
     tensors = []
     if t is list:
@@ -42,7 +44,6 @@ class Hypothesis(dict):
 
         :param any model_state: stored state given by the model
         """
-
         super(Hypothesis).__init__()
         self.model_state = model_state
 
