@@ -10,7 +10,7 @@ CTC_SCORING_RATIO = 1.5
 
 
 def find_first_tensor(list_of_tensor_or_tensor):
-	"""Finds the first tensor in a tree."""
+    """Finds the first tensor in a tree."""
     t = type(list_of_tensor_or_tensor)
     if t is torch.Tensor:
         return list_of_tensor_or_tensor
@@ -20,7 +20,7 @@ def find_first_tensor(list_of_tensor_or_tensor):
 
 
 def find_all_tensors(l):
-	"""Finds all the tensors in a tree."""
+    """Finds all the tensors in a tree."""
     t = type(l)
     tensors = []
     if t is list:
@@ -40,7 +40,7 @@ class Hypothesis(dict):
     def __init__(self, model_state=None):
         """Construct an Hypothesis object.
 
-		:param any model_state: stored state given by the model
+        :param any model_state: stored state given by the model
         """
 
         super(Hypothesis).__init__()
@@ -68,7 +68,7 @@ class BeamableModel:
 
 
 class BeamSearch:
-	"""BeamSearch module.
+    """BeamSearch module.
 
     :param model BeamableModel
     :param recog_args: program arguments
@@ -78,7 +78,7 @@ class BeamSearch:
     """
 
     def __init__(self, model, recog_args, char_list, replace_sos):
-		"""Construct a BeacmSearch Object."""
+        """Construct a BeacmSearch Object."""
         self.recog_args = recog_args
         self.char_list = char_list
         self.model = model
