@@ -20,8 +20,8 @@ from espnet.nets.pytorch_backend.nets_utils import mask_by_length
 from espnet.nets.pytorch_backend.nets_utils import pad_list
 from espnet.nets.pytorch_backend.nets_utils import th_accuracy
 from espnet.nets.pytorch_backend.nets_utils import to_device
-from espnet.nets.scorer_interface import ScorerInterface
 from espnet.nets.pytorch_backend.rnn.beamsearch import BeamableModel
+from espnet.nets.scorer_interface import ScorerInterface
 
 MAX_DECODER_OUTPUT = 5
 CTC_SCORING_RATIO = 1.5
