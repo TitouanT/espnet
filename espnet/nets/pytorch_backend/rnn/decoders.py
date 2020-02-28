@@ -105,7 +105,6 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
 
     def rnn_forward(self, ey, z_list, c_list, z_prev, c_prev):
         z_list = [None] * self.dlayers
-        c_list = None
         if self.dtype == "lstm":
             c_list = [None] * self.dlayers
             z_list[0], c_list[0] = self.decoder[0](ey, (z_prev[0], c_prev[0]))
