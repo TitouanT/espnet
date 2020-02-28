@@ -285,7 +285,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         return state
 
     def decode_from_state(self, state, h, vy):
-        new_state = {}
+        new_state = {'att_idx': state['att_idx']}
         if self.num_encs == 1:
             h = [h]
 
