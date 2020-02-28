@@ -21,12 +21,13 @@ from espnet.nets.pytorch_backend.nets_utils import pad_list
 from espnet.nets.pytorch_backend.nets_utils import th_accuracy
 from espnet.nets.pytorch_backend.nets_utils import to_device
 from espnet.nets.scorer_interface import ScorerInterface
+from espnet.nets.pytorch_backend.rnn.beamsearch import BeamableModel
 
 MAX_DECODER_OUTPUT = 5
 CTC_SCORING_RATIO = 1.5
 
 
-class Decoder(torch.nn.Module, ScorerInterface):
+class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
     """Decoder module
 
     :param int eprojs: encoder projection units
@@ -103,7 +104,10 @@ class Decoder(torch.nn.Module, ScorerInterface):
         return hs_pad.new_zeros(hs_pad.size(0), self.dunits)
 
     def rnn_forward(self, ey, z_list, c_list, z_prev, c_prev):
+        z_list = [None] * self.dlayers
+        c_list = None
         if self.dtype == "lstm":
+            c_list = [None] * self.dlayers
             z_list[0], c_list[0] = self.decoder[0](ey, (z_prev[0], c_prev[0]))
             for l in six.moves.range(1, self.dlayers):
                 z_list[l], c_list[l] = self.decoder[l](
@@ -255,6 +259,83 @@ class Decoder(torch.nn.Module, ScorerInterface):
             self.loss = (1. - self.lsm_weight) * self.loss + self.lsm_weight * loss_reg
 
         return self.loss, acc, ppl
+
+    def initial_decoding_state(self, h, strm_idx=0):
+        if self.num_encs == 1:
+            h = [h]
+
+        att_idx = min(strm_idx, len(self.att) - 1)
+        state = {'att_idx': att_idx}
+
+        # initialization
+        c_list = [self.zero_state(h[0].unsqueeze(0))]
+        z_list = [self.zero_state(h[0].unsqueeze(0))]
+        state['c_list'] = c_list
+        state['z_list'] = z_list
+        for _ in six.moves.range(1, self.dlayers):
+            c_list.append(self.zero_state(h[0].unsqueeze(0)))
+            z_list.append(self.zero_state(h[0].unsqueeze(0)))
+        if self.num_encs == 1:
+            a = None
+            self.att[att_idx].reset()  # reset pre-computation of h
+        else:
+            a = [None] * (self.num_encs + 1)  # atts + han
+            att_w_list = [None] * (self.num_encs + 1)  # atts + han
+            att_c_list = [None] * (self.num_encs)  # atts
+            state['att_w_list'] = att_w_list
+            state['att_c_list'] = att_c_list
+            for idx in range(self.num_encs + 1):
+                self.att[idx].reset()  # reset pre-computation of h in atts and han
+        state['a_prev'] = a
+        return state
+
+    def decode_from_state(self, state, h, vy):
+        new_state = {}
+        if self.num_encs == 1:
+            h = [h]
+
+        ey = self.dropout_emb(self.embed(vy))  # utt list (1) x zdim
+        if self.num_encs == 1:
+            att_c, att_w = self.att[state['att_idx']](
+                h[0].unsqueeze(0),
+                [h[0].size(0)],
+                self.dropout_dec[0](state['z_prev'][0]),
+                state['a_prev']
+            )
+        else:
+            att_w_list = [None] * (self.num_encs + 1)  # atts + han
+            att_c_list = [None] * (self.num_encs)  # atts
+            for idx in range(self.num_encs):
+                att_c_list[idx], att_w_list[idx] = self.att[idx](
+                    h[idx].unsqueeze(0),
+                    [h[idx].size(0)],
+                    self.dropout_dec[0](state['z_prev'][0]),
+                    state['a_prev'][idx]
+                )
+            h_han = torch.stack(att_c_list, dim=1)
+            att_c, att_w_list[self.num_encs] = self.att[self.num_encs](
+                h_han,
+                [self.num_encs],
+                self.dropout_dec[0](state['z_prev'][0]),
+                state['a_prev'][self.num_encs]
+            )
+        ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
+        z_list, c_list = self.rnn_forward(ey, [], [], state['z_prev'], state['c_prev'])
+
+        if self.num_encs == 1:
+            new_state['a_prev'] = att_w
+        else:
+            new_state['a_prev'] = att_w_list
+        new_state['z_prev'] = z_list
+        new_state['c_prev'] = c_list
+
+        # get nbest local scores and their ids
+        if self.context_residual:
+            logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
+        else:
+            logits = self.output(self.dropout_dec[-1](z_list[-1]))
+        local_att_scores = F.log_softmax(logits, dim=1)
+        return new_state, local_att_scores
 
     def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
         """beam search implementation

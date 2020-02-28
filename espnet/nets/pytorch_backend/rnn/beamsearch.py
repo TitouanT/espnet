@@ -115,7 +115,7 @@ class BeamSearch:
         minlen = int(minlenratio * maxlen)
 
         # initialize hypothesis
-        hyp = Hypothesis(self.model.initial_decoding_state())
+        hyp = Hypothesis(self.model.initial_decoding_state(h))
         hyps = [hyp]
 
         hyp['score'] = 0.0
@@ -169,7 +169,7 @@ class BeamSearch:
                 # step forward the decoding
                 vy[0] = hyp['yseq'][i]
                 model_state, local_att_scores = self.model.decode_from_state(
-                    hyp.model_state, self.h, vy
+                    hyp.model_state, h, vy
                 )
                 # local_att_scores = F.log_softmax(logits, dim=1)
 

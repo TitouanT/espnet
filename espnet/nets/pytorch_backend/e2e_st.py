@@ -38,6 +38,7 @@ from espnet.nets.pytorch_backend.rnn.attentions import att_for
 from espnet.nets.pytorch_backend.rnn.decoders import decoder_for
 from espnet.nets.pytorch_backend.rnn.encoders import encoder_for
 from espnet.nets.st_interface import STInterface
+from espnet.nets.pytorch_backend.rnn.beamsearch import BeamableModel
 
 CTC_LOSS_THRESHOLD = 10000
 
@@ -62,7 +63,7 @@ class Reporter(chainer.Chain):
         reporter.report({'loss': mtl_loss}, self)
 
 
-class E2E(STInterface, torch.nn.Module):
+class E2E(STInterface, BeamableModel, torch.nn.Module):
     """E2E module.
 
     :param int idim: dimension of inputs
@@ -475,8 +476,18 @@ class E2E(STInterface, torch.nn.Module):
 
         # 2. Decoder
         # decode the first utterance
-        y = self.dec.recognize_beam(hs[0], lpz, trans_args, char_list, rnnlm)
+        bs = BeamSearch(self, trans_args, char_list, self.replace_sos)
+        y = bs.recognize_beam(x, lpz, rnnlm)
         return y
+
+    def encode_for_beam(self, x):
+        return self.encode(x).unsqueeze(0)[0]
+
+    def initial_decoding_state(self, h):
+        return self.dec.initial_decoding_state(h)
+
+    def decode_from_state(self, state, h, vy):
+        return self.dec.decode_from_state(state, h, vy)
 
     def translate_batch(self, xs, trans_args, char_list, rnnlm=None):
         """E2E beam search.
