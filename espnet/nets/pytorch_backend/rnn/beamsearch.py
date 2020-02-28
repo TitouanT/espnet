@@ -88,6 +88,7 @@ class BeamSearch:
         self.beam_size = recog_args.beam_size
         self.penalty = recog_args.penalty
         self.ctc_weight = getattr(recog_args, "ctc_weight", False)  # for NMT
+        self.eos = model.eos
 
         # start of sequence
         if replace_sos and self.recog_args.tgt_lang:
@@ -231,9 +232,8 @@ class BeamSearch:
                 for j in six.moves.range(self.beam_size):
                     new_hyp = Hypothesis(model_state)
                     new_hyp['score'] = hyp['score'] + local_best_scores[0, j]
-                    new_hyp['yseq'] = hyp['yseq'][:].append(
-                        int(local_best_ids[0, j])
-                    )
+                    new_hyp['yseq'] = hyp['yseq'][:]
+                    new_hyp['yseq'].append(int(local_best_ids[0, j]))
 
                     if rnnlm:
                         new_hyp['rnnlm_prev'] = rnnlm_state
