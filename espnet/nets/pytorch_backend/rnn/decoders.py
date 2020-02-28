@@ -270,8 +270,8 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         # initialization
         c_list = [self.zero_state(h[0].unsqueeze(0))]
         z_list = [self.zero_state(h[0].unsqueeze(0))]
-        state['c_list'] = c_list
-        state['z_list'] = z_list
+        state['c_prev'] = c_list
+        state['z_prev'] = z_list
         for _ in six.moves.range(1, self.dlayers):
             c_list.append(self.zero_state(h[0].unsqueeze(0)))
             z_list.append(self.zero_state(h[0].unsqueeze(0)))
@@ -280,10 +280,6 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
             self.att[att_idx].reset()  # reset pre-computation of h
         else:
             a = [None] * (self.num_encs + 1)  # atts + han
-            att_w_list = [None] * (self.num_encs + 1)  # atts + han
-            att_c_list = [None] * (self.num_encs)  # atts
-            state['att_w_list'] = att_w_list
-            state['att_c_list'] = att_c_list
             for idx in range(self.num_encs + 1):
                 self.att[idx].reset()  # reset pre-computation of h in atts and han
         state['a_prev'] = a
