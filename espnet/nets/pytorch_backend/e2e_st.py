@@ -36,7 +36,7 @@ from espnet.nets.pytorch_backend.nets_utils import to_device
 from espnet.nets.pytorch_backend.nets_utils import to_torch_tensor
 from espnet.nets.pytorch_backend.rnn.attentions import att_for
 from espnet.nets.pytorch_backend.rnn.beamsearch import BeamableModel
-from espnet.nets.pytorch_backend.rnn.beamsearch import BeaSearch
+from espnet.nets.pytorch_backend.rnn.beamsearch import BeamSearch
 from espnet.nets.pytorch_backend.rnn.decoders import decoder_for
 from espnet.nets.pytorch_backend.rnn.encoders import encoder_for
 from espnet.nets.st_interface import STInterface
