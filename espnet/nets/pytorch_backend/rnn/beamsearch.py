@@ -1,22 +1,26 @@
 import logging
-import torch
-import torch.nn.functional as F
 import numpy as np
 import six
-from espnet.nets.e2e_asr_common import end_detect
+import torch
+
 from espnet.nets.ctc_prefix_score import CTCPrefixScore
+from espnet.nets.e2e_asr_common import end_detect
 
 CTC_SCORING_RATIO = 1.5
 
+
 def find_first_tensor(list_of_tensor_or_tensor):
+	"""Finds the first tensor in a tree."""
     t = type(list_of_tensor_or_tensor)
     if t is torch.Tensor:
         return list_of_tensor_or_tensor
     if t is list and len(t):
-        return find_tensor(list_of_tensor_or_tensor[0])
+        return find_first_tensor(list_of_tensor_or_tensor[0])
     return torch.Tensor()
 
+
 def find_all_tensors(l):
+	"""Finds all the tensors in a tree."""
     t = type(l)
     tensors = []
     if t is list:
@@ -26,34 +30,45 @@ def find_all_tensors(l):
         tensors.append(l)
     return tensors
 
+
 class Hypothesis(dict):
-    """Hypothesis class
-    keeps track of state needed to generate a BeamSearch hypothesis and the hypothesis itself
+    """Hypothesis class.
 
     :param any model_state: stored state given by the model
     """
+
     def __init__(self, model_state=None):
+        """Construct an Hypothesis object.
+
+		:param any model_state: stored state given by the model
+        """
+
         super(Hypothesis).__init__()
         self.model_state = model_state
 
+
 class BeamableModel:
+    """BeamableModel class.
+
+    :param any model_state: stored state given by the model
+    """
+
     def encode_for_beam(self, x):
-        """Return the projection h of x to start decoding"""
+        """Return the projection h of x to start decoding."""
         raise NotImplementedError
 
     def initial_decoding_state(self):
-        """Give the state to start a new decoding"""
+        """Give the state to start a new decoding."""
         raise NotImplementedError
 
     def decode_from_state(self, state, h, vy):
-        """Advance one step the decoding of h from state, vy is the last decoded element"""
+        """Advance one step the decoding of h from state, vy is the last decoded element."""
         # and returns its decoding state
         raise NotImplementedError
 
 
-
 class BeamSearch:
-    """BeamSearch module
+	"""BeamSearch module.
 
     :param model BeamableModel
     :param recog_args: program arguments
@@ -61,7 +76,9 @@ class BeamSearch:
     :param replace_sos
 
     """
+
     def __init__(self, model, recog_args, char_list, replace_sos):
+		"""Construct a BeacmSearch Object."""
         self.recog_args = recog_args
         self.char_list = char_list
         self.model = model
@@ -69,7 +86,7 @@ class BeamSearch:
         # search params
         self.beam_size = recog_args.beam_size
         self.penalty = recog_args.penalty
-        self.ctc_weight = getattr(reco_args, "ctc_weight", False) # for NMT
+        self.ctc_weight = getattr(recog_args, "ctc_weight", False)  # for NMT
 
         # start of sequence
         if replace_sos and self.recog_args.tgt_lang:
@@ -78,7 +95,7 @@ class BeamSearch:
             self.sos = model.sos
 
     def recognize_beam(self, x, lpz, rnnlm=None, minlenratio=None):
-        """Returns the nbest hypotheses for x"""
+        """Return the nbest hypotheses for x."""
         # when we retry with a different minlenratio,
         # no need to duplicate recog_args
         if minlenratio is None:
@@ -87,13 +104,13 @@ class BeamSearch:
         h = self.model.encode_for_beam(x)
         # vy is a tensor containing the id
         # of the last decoded element at each step
-        vy = find_tensor(h).new_zeros(1).long()
+        vy = find_first_tensor(h).new_zeros(1).long()
 
         # maxlen minlen calculation
         maxlen = np.amin([t.size(0) for t in find_all_tensors(h)])
         if self.recog_args.maxlenratio != 0:
             maxlen = int(self.recog_args.maxlenratio * maxlen)
-        maxlen = max(1, maxlen) # maxlen >= 1
+        maxlen = max(1, maxlen)  # maxlen >= 1
         minlen = int(minlenratio * maxlen)
 
         # initialize hypothesis
@@ -155,9 +172,9 @@ class BeamSearch:
                 )
                 # local_att_scores = F.log_softmax(logits, dim=1)
 
-                # ┌────────────────────────────────────────────────────┐
-                # │ prepare the generation of the next beam hypotheses │
-                # └────────────────────────────────────────────────────┘
+                # ┌─────────────────────────────────────────────────────────┐
+                # │ prepare the generation of the next beam_size hypotheses │
+                # └─────────────────────────────────────────────────────────┘
                 if rnnlm:
                     rnnlm_state, local_lm_scores = rnnlm.predict(
                         hyp['rnnlm_prev'], vy
@@ -168,7 +185,6 @@ class BeamSearch:
                     )
                 else:
                     local_scores = local_att_scores
-
 
                 if has_ctc:
                     local_best_scores, local_best_ids = torch.topk(
@@ -200,18 +216,18 @@ class BeamSearch:
                         )
 
                     local_best_scores, joint_best_ids = torch.topk(
-                        local_scores, beam, dim=1
+                        local_scores, beam_size, dim=1
                     )
                     local_best_ids = local_best_ids[:, joint_best_ids[0]]
                 else:
                     local_best_scores, local_best_ids = torch.topk(
-                        local_scores, beam, dim=1
+                        local_scores, beam_size, dim=1
                     )
 
-                # ┌────────────────────────────────────┐
-                # │ genereate the next beam hypotheses │
-                # └────────────────────────────────────┘
-                for j in six.moves.range(beam):
+                # ┌─────────────────────────────────────────┐
+                # │ genereate the next beam_size hypotheses │
+                # └─────────────────────────────────────────┘
+                for j in six.moves.range(beam_size):
                     new_hyp = Hypothesis(model_state)
                     new_hyp['score'] = hyp['score'] + local_best_scores[0, j]
                     new_hyp['yseq'] = hyp['yseq'][:].append(
@@ -235,7 +251,7 @@ class BeamSearch:
 
                 hyps_best_kept = sorted(
                     hyps_best_kept, key=lambda x: x['score'], reverse=True
-                )[:beam]
+                )[:beam_size]
 
             # ┌─────────────────────────────────────┐
             # │ treat the newly explored hypotheses │
@@ -259,9 +275,9 @@ class BeamSearch:
                 if hyp['yseq'][-1] == self.eos:
                     # only store the sequence that has more than minlen outputs
                     # also add penalty
-                    length_penalty = (i+1) * penalty
+                    penalty = (i + 1) * self.penalty
                     if len(hyp['yseq']) > minlen:
-                        hyp['score'] += length_penalty
+                        hyp['score'] += penalty
                         if rnnlm:  # Word LM needs to add final <eos> score
                             hyp['score'] += (
                                 self.recog_args.lm_weight *
@@ -284,7 +300,7 @@ class BeamSearch:
         # └────────────────────────────────────────────────────────┘
         nbest_hyps = sorted(
             ended_hyps, key=lambda x: x['score'], reverse=True
-        )[:min(len(ended_hyps), recog_args.nbest)]
+        )[:min(len(ended_hyps), self.recog_args.nbest)]
 
         # check number of hypotheses
         if len(nbest_hyps) == 0 and minlenratio != 0:
@@ -292,14 +308,12 @@ class BeamSearch:
                 'there is no N-best results, '
                 'perform recognition again with smaller minlenratio.'
             )
-            minlenratio = max(0.0, recog_args.minlenratio - 0.1)
+            minlenratio = max(0.0, self.recog_args.minlenratio - 0.1)
             return self.recognize_beam(
                 x, lpz, rnnlm, minlenratio=minlenratio
             )
         return nbest_hyps
 
     def recognize_beam_batch(self, xs):
-        """Returns the nbest Hypothesis for each element of the batch xs"""
+        """Return the nbest Hypothesis for each element of the batch xs."""
         raise NotImplementedError
-
-
