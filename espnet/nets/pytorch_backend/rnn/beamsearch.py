@@ -216,18 +216,18 @@ class BeamSearch:
                         )
 
                     local_best_scores, joint_best_ids = torch.topk(
-                        local_scores, beam_size, dim=1
+                        local_scores, self.beam_size, dim=1
                     )
                     local_best_ids = local_best_ids[:, joint_best_ids[0]]
                 else:
                     local_best_scores, local_best_ids = torch.topk(
-                        local_scores, beam_size, dim=1
+                        local_scores, self.beam_size, dim=1
                     )
 
                 # ┌─────────────────────────────────────────┐
                 # │ genereate the next beam_size hypotheses │
                 # └─────────────────────────────────────────┘
-                for j in six.moves.range(beam_size):
+                for j in six.moves.range(self.beam_size):
                     new_hyp = Hypothesis(model_state)
                     new_hyp['score'] = hyp['score'] + local_best_scores[0, j]
                     new_hyp['yseq'] = hyp['yseq'][:].append(
@@ -251,7 +251,7 @@ class BeamSearch:
 
                 hyps_best_kept = sorted(
                     hyps_best_kept, key=lambda x: x['score'], reverse=True
-                )[:beam_size]
+                )[:self.beam_size]
 
             # ┌─────────────────────────────────────┐
             # │ treat the newly explored hypotheses │
