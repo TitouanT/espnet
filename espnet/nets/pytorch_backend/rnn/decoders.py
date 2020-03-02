@@ -263,9 +263,8 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
             h = [h]
 
         att_idx = min(strm_idx, len(self.att) - 1)
-        state = {'att_idx': att_idx}
+        state = {'att_idx': att_idx, 'c_prev': None}
 
-        # initialization
         if self.dtype == 'lstm':
             state['c_prev'] = [
                 self.zero_state(h[0].unsqueeze(0))
@@ -284,7 +283,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         return state
 
     def decode_from_state(self, state, h, vy):
-        new_state = {'att_idx': state['att_idx']}
+        new_state = {'att_idx': state['att_idx'], 'c_prev': None}
         if self.num_encs == 1:
             h = [h]
 
