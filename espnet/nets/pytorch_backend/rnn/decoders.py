@@ -105,18 +105,18 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
 
     def rnn_forward(self, ey, z_prev, c_prev):
         z_list = [None] * self.dlayers
+        c_list = None
         if self.dtype == "lstm":
             c_list = [None] * self.dlayers
             z_list[0], c_list[0] = self.decoder[0](ey, (z_prev[0], c_prev[0]))
             for l in six.moves.range(1, self.dlayers):
                 z_list[l], c_list[l] = self.decoder[l](
                     self.dropout_dec[l - 1](z_list[l - 1]), (z_prev[l], c_prev[l]))
-            return z_list, c_list
         else:
             z_list[0] = self.decoder[0](ey, z_prev[0])
             for l in six.moves.range(1, self.dlayers):
                 z_list[l] = self.decoder[l](self.dropout_dec[l - 1](z_list[l - 1]), z_prev[l])
-        return z_list
+        return z_list, c_list
 
     def forward(self, hs_pad, hlens, ys_pad, strm_idx=0, lang_ids=None):
         """Decoder forward
