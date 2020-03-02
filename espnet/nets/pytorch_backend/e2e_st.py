@@ -484,9 +484,9 @@ class E2E(STInterface, BeamableModel, torch.nn.Module):
         """Return the projection h of x to start decoding."""
         return self.encode(x).unsqueeze(0)[0]
 
-    def initial_decoding_state(self, h):
+    def initial_decoding_state(self, h, strm_idx):
         """Give the state to start a new decoding."""
-        return self.dec.initial_decoding_state(h)
+        return self.dec.initial_decoding_state(h, strm_idx)
 
     def decode_from_state(self, state, h, vy):
         """Advance one step the decoding of h from state, vy is the last decoded element."""

@@ -58,7 +58,7 @@ class BeamableModel:
         """Return the projection h of x to start decoding."""
         raise NotImplementedError
 
-    def initial_decoding_state(self, h):
+    def initial_decoding_state(self, h, strm_idx):
         """Give the state to start a new decoding."""
         raise NotImplementedError
 
