@@ -103,7 +103,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
     def zero_state(self, hs_pad):
         return hs_pad.new_zeros(hs_pad.size(0), self.dunits)
 
-    def rnn_forward(self, ey, z_list, c_list, z_prev, c_prev):
+    def rnn_forward(self, ey, z_prev, c_prev):
         z_list = [None] * self.dlayers
         if self.dtype == "lstm":
             c_list = [None] * self.dlayers
@@ -111,11 +111,12 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
             for l in six.moves.range(1, self.dlayers):
                 z_list[l], c_list[l] = self.decoder[l](
                     self.dropout_dec[l - 1](z_list[l - 1]), (z_prev[l], c_prev[l]))
+            return z_list, c_list
         else:
             z_list[0] = self.decoder[0](ey, z_prev[0])
             for l in six.moves.range(1, self.dlayers):
                 z_list[l] = self.decoder[l](self.dropout_dec[l - 1](z_list[l - 1]), z_prev[l])
-        return z_list, c_list
+        return z_list
 
     def forward(self, hs_pad, hlens, ys_pad, strm_idx=0, lang_ids=None):
         """Decoder forward
@@ -211,7 +212,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
                 ey = torch.cat((z_out, att_c), dim=1)  # utt x (zdim + hdim)
             else:
                 ey = torch.cat((eys[:, i, :], att_c), dim=1)  # utt x (zdim + hdim)
-            z_list, c_list = self.rnn_forward(ey, z_list, c_list, z_list, c_list)
+            z_list, c_list = self.rnn_forward(ey, z_list, c_list)
             if self.context_residual:
                 z_all.append(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))  # utt x (zdim + hdim)
             else:
@@ -315,7 +316,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
                 state['a_prev'][self.num_encs]
             )
         ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
-        z_list, c_list = self.rnn_forward(ey, [], [], state['z_prev'], state['c_prev'])
+        z_list, c_list = self.rnn_forward(ey, state['z_prev'], state['c_prev'])
 
         if self.num_encs == 1:
             new_state['a_prev'] = att_w
@@ -440,7 +441,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
                                                                                self.dropout_dec[0](hyp['z_prev'][0]),
                                                                                hyp['a_prev'][self.num_encs])
                 ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
-                z_list, c_list = self.rnn_forward(ey, z_list, c_list, hyp['z_prev'], hyp['c_prev'])
+                z_list, c_list = self.rnn_forward(ey, hyp['z_prev'], hyp['c_prev'])
 
                 # get nbest local scores and their ids
                 if self.context_residual:
@@ -479,10 +480,10 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
                 for j in six.moves.range(beam):
                     new_hyp = {}
                     # [:] is needed!
-                    new_hyp['z_prev'] = z_list[:]
-                    new_hyp['c_prev'] = c_list[:]
+                    new_hyp['z_prev'] = z_list
+                    new_hyp['c_prev'] = c_list
                     if self.num_encs == 1:
-                        new_hyp['a_prev'] = att_w[:]
+                        new_hyp['a_prev'] = att_w
                     else:
                         new_hyp['a_prev'] = [att_w_list[idx][:] for idx in range(self.num_encs + 1)]
                     new_hyp['score'] = hyp['score'] + local_best_scores[0, j]
@@ -677,7 +678,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
             ey = torch.cat((ey, att_c), dim=1)
 
             # attention decoder
-            z_list, c_list = self.rnn_forward(ey, z_list, c_list, z_prev, c_prev)
+            z_list, c_list = self.rnn_forward(ey, z_prev, c_prev)
             if self.context_residual:
                 logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
             else:
@@ -873,7 +874,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
                                                                            att_w_list[self.num_encs])
                 att_ws.append(att_w_list)
             ey = torch.cat((eys[:, i, :], att_c), dim=1)  # utt x (zdim + hdim)
-            z_list, c_list = self.rnn_forward(ey, z_list, c_list, z_list, c_list)
+            z_list, c_list = self.rnn_forward(ey, z_list, c_list)
 
         if self.num_encs == 1:
             # convert to numpy array with the shape (B, Lmax, Tmax)
@@ -969,7 +970,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
                                                                   self.dropout_dec[0](state['z_prev'][0]),
                                                                   state['a_prev'][self.num_encs])
         ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
-        z_list, c_list = self.rnn_forward(ey, z_list, c_list, state['z_prev'], state['c_prev'])
+        z_list, c_list = self.rnn_forward(ey, state['z_prev'], state['c_prev'])
         if self.context_residual:
             logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
         else:
