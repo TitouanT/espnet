@@ -576,7 +576,6 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         # remove sos
         return nbest_hyps
 
-
     def recognize_beam_batch(self, h, hlens, lpz, recog_args, char_list, rnnlm=None,
                              normalize_score=True, strm_idx=0, lang_ids=None):
         # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
