@@ -96,7 +96,7 @@ class BeamSearch:
         else:
             self.sos = model.sos
 
-    def recognize_beam(self, x, lpz, rnnlm=None, minlenratio=None):
+    def recognize_beam(self, x, lpz, rnnlm=None, minlenratio=None, strm_idx=0):
         """Return the nbest hypotheses for x."""
         # when we retry with a different minlenratio,
         # no need to duplicate recog_args
@@ -116,7 +116,7 @@ class BeamSearch:
         minlen = int(minlenratio * maxlen)
 
         # initialize hypothesis
-        hyp = Hypothesis(self.model.initial_decoding_state(h))
+        hyp = Hypothesis(self.model.initial_decoding_state(h, strm_idx))
         hyps = [hyp]
 
         hyp['score'] = 0.0
