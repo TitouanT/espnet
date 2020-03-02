@@ -333,6 +333,9 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         local_att_scores = F.log_softmax(logits, dim=1)
         return new_state, local_att_scores
 
+    def encode_for_beam(self, h):
+        return h
+
     def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
         """beam search implementation
 
@@ -347,6 +350,10 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         :return: N-best decoding results
         :rtype: list of dicts
         """
+        # bs = BeamSearch(self, recog_args, char_list, self.replace_sos)
+        # nbest_hyp = bs.recognize_beam(h, lpz, rnnlm=rnnlm, strm_idx=strm_idx)
+        # return nbest_hyp
+
         # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
         if self.num_encs == 1:
             h = [h]
@@ -569,6 +576,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         # remove sos
         return nbest_hyps
 
+
     def recognize_beam_batch(self, h, hlens, lpz, recog_args, char_list, rnnlm=None,
                              normalize_score=True, strm_idx=0, lang_ids=None):
         # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
@@ -734,8 +742,10 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
                     _c_prev_ = torch.index_select(att_w_list[idx][1][1].view(n_bb, -1), 0, vidx)
                     _a_prev = (_a_prev_, (_h_prev_, _c_prev_))
                 a_prev.append(_a_prev)
-            z_prev = [torch.index_select(z_list[li].view(n_bb, -1), 0, vidx) for li in range(self.dlayers)]
-            c_prev = [torch.index_select(c_list[li].view(n_bb, -1), 0, vidx) for li in range(self.dlayers)]
+            # z_prev = [torch.index_select(z_list[li].view(n_bb, -1), 0, vidx) for li in range(self.dlayers)]
+            # c_prev = [torch.index_select(c_list[li].view(n_bb, -1), 0, vidx) for li in range(self.dlayers)]
+            z_prev = z_list
+            c_prev = c_prev
 
             # pick ended hyps
             if i >= minlen:
