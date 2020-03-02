@@ -241,11 +241,11 @@ class BeamSearch:
                     if has_ctc:
                         new_hyp['ctc_state_prev'] = [
                             ctc_states[idx][joint_best_ids[0, j]]
-                            for idx in range(self.num_encs)
+                            for idx in range(num_ctc)
                         ]
                         new_hyp['ctc_score_prev'] = [
                             ctc_scores[idx][joint_best_ids[0, j]]
-                            for idx in range(self.num_encs)
+                            for idx in range(num_ctc)
                         ]
                     # will be (2 x beam) hyps at most
                     hyps_best_kept.append(new_hyp)
