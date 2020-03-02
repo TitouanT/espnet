@@ -16,7 +16,7 @@ def find_first_tensor(list_of_tensor_or_tensor):
     t = type(list_of_tensor_or_tensor)
     if t is torch.Tensor:
         return list_of_tensor_or_tensor
-    if t is list and len(t):
+    if t is list and len(list_of_tensor_or_tensor):
         return find_first_tensor(list_of_tensor_or_tensor[0])
     return torch.Tensor()
 
