@@ -482,7 +482,9 @@ class E2E(STInterface, BeamableModel, torch.nn.Module):
 
     def encode_for_beam(self, x):
         """Return the projection h of x to start decoding."""
-        return self.encode(x).unsqueeze(0)[0]
+		h = self.encode(x).unsqueeze(0)[0]
+		h = self.dec.encode_for_beam(h)
+        return h
 
     def initial_decoding_state(self, h, strm_idx):
         """Give the state to start a new decoding."""

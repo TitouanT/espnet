@@ -43,7 +43,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
     :param float sampling_probability: scheduled sampling probability
     :param float dropout: dropout rate
     :param float context_residual: if True, use context vector for token generation
-    :param float replace_sos: use for multilingual (speech/text) translation
+    :param bool replace_sos: use for multilingual (speech/text) translation
     """
 
     def __init__(self, eprojs, odim, dtype, dlayers, dunits, sos, eos, att, verbose=0,
@@ -259,17 +259,12 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         return self.loss, acc, ppl
 
     def initial_decoding_state(self, h, strm_idx=0):
-        if self.num_encs == 1:
-            h = [h]
-
+        # This is per hypotesis state
         att_idx = min(strm_idx, len(self.att) - 1)
         state = {'att_idx': att_idx, 'c_prev': None}
 
         if self.dtype == 'lstm':
-            state['c_prev'] = [
-                self.zero_state(h[0].unsqueeze(0))
-                for _ in range(self.dlayers)
-            ]
+            state['c_prev'] = [self.zero_state(h[0].unsqueeze(0)) for _ in range(self.dlayers)]
         state['z_prev'] = [self.zero_state(h[0].unsqueeze(0)) for _ in range(self.dlayers)]
 
         if self.num_encs == 1:
@@ -284,8 +279,6 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
 
     def decode_from_state(self, state, h, vy):
         new_state = {'att_idx': state['att_idx'], 'c_prev': None}
-        if self.num_encs == 1:
-            h = [h]
 
         ey = self.dropout_emb(self.embed(vy))  # utt list (1) x zdim
         if self.num_encs == 1:
@@ -332,6 +325,10 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         return new_state, local_att_scores
 
     def encode_for_beam(self, h):
+        """Put encoded data in the correct shape."""
+        if self.num_encs == 1:
+            return [h]
+        maxlen = np.amin([h[idx].size(0) for idx in range(self.num_encs)])
         return h
 
     def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
@@ -351,6 +348,110 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         bs = BeamSearch(self, recog_args, char_list, self.replace_sos)
         nbest_hyp = bs.recognize_beam(h, lpz, rnnlm=rnnlm, strm_idx=strm_idx)
         return nbest_hyp
+
+    def encode_for_beam_batch(self, h, hlens):
+        """Put encoded data in the correct shape."""
+        if self.num_encs == 1:
+            h = [h]
+            hlens = [hlens]
+
+        for idx in range(self.num_encs):
+            h[idx] = mask_by_length(h[idx], hlens[idx], 0.0)
+        return h, hlens
+
+    def initial_decoding_state_batch(self, h, strm_idx, batch_size, beam_size):
+        # h is not needed here but it might for other models
+        att_idx = min(strm_idx, len(self.att) - 1)
+        state = {'att_idx':att_idx}
+
+        max_n_hyps = batch_size*beam_size
+        c_prev = None
+        if self.dtype == 'lstm':
+            c_prev = [to_device(self, torch.zeros(max_n_hyps, self.dunits)) for _ in range(self.dlayers)]
+        z_prev = [to_device(self, torch.zeros(max_n_hyps, self.dunits)) for _ in range(self.dlayers)]
+        state['z_prev'] = z_prev
+        state['c_prev'] = c_prev
+
+        if self.num_encs == 1:
+            a_prev = [None]
+            self.att[att_idx].reset()  # reset pre-computation of h
+        else:
+            a_prev = [None] * (self.num_encs + 1)  # atts + han
+            for idx in range(self.num_encs + 1):
+                self.att[idx].reset()  # reset pre-computation of h in atts and han
+        state['a_prev'] = a_prev
+
+
+        h, hlens = h
+        exp_hlens = [
+            hlen.repeat(beam_size).view(beam_size, batch_size).transpose(0, 1).reshape(-1).tolist()
+            for hlen in hlens
+        ]
+        exp_h = [
+            hi.unsqueeze(1).repeat(1, beam_size, 1, 1).reshape(n_bb, *hi.size()[1:3])
+            for hi in h
+        ]
+        state['exp_hlens'] = exp_hlens
+        state['exp_h'] = exp_h
+        return state
+
+    def decode_from_state_batch(self, state, h, vy, batch_size, beam_size, vidx):
+        n_bb = batch_size * beam_size
+
+        if vidx is not None:
+            att_w_list = state['att_w_list']
+            a_prev = []
+            num_atts = 1 if self.num_encs == 1 else self.num_encs + 1
+            for idx in range(num_atts):
+                if isinstance(att_w_list[idx], torch.Tensor):
+                    _a_prev = torch.index_select(att_w_list[idx].view(n_bb, *att_w_list[idx].shape[1:]), 0, vidx)
+                elif isinstance(att_w_list[idx], list):
+                    # handle the case of multi-head attention
+                    _a_prev = [torch.index_select(att_w_one.view(n_bb, -1), 0, vidx) for att_w_one in att_w_list[idx]]
+                else:
+                    # handle the case of location_recurrent when return is a tuple
+                    _a_prev_ = torch.index_select(att_w_list[idx][0].view(n_bb, -1), 0, vidx)
+                    _h_prev_ = torch.index_select(att_w_list[idx][1][0].view(n_bb, -1), 0, vidx)
+                    _c_prev_ = torch.index_select(att_w_list[idx][1][1].view(n_bb, -1), 0, vidx)
+                    _a_prev = (_a_prev_, (_h_prev_, _c_prev_))
+                a_prev.append(_a_prev)
+            z_prev = [torch.index_select(state['z_prev'][li].view(n_bb, -1), 0, vidx) for li in range(self.dlayers)]
+            if self.dtype == 'lstm':
+                c_prev = [torch.index_select(state['c_list'][li].view(n_bb, -1), 0, vidx) for li in range(self.dlayers)]
+
+        ey = self.dropout_emb(self.embed(vy))
+        if self.num_encs == 1:
+            att_c, att_w = self.att[state['att_idx']](state['exp_h'][0], state['exp_hlens'][0], self.dropout_dec[0](z_prev[0]), a_prev[0])
+            att_w_list = [att_w]
+        else:
+            att_c_list = [None] * self.num_encs
+            att_w_list = [None] * (self.num_encs + 1)
+            for idx in range(self.num_encs):
+                att_c_list[idx], att_w_list[idx] = self.att[idx](
+                    state['exp_h'][idx],
+                    state['exp_hlens'][idx],
+                    self.dropout_dec[0](z_prev[0]), a_prev[idx]
+                )
+            exp_h_han = torch.stack(att_c_list, dim=1)
+            att_c, att_w_list[self.num_encs] = self.att[self.num_encs](
+                exp_h_han, [self.num_encs] * n_bb, self.dropout_dec[0](z_prev[0]), a_prev[self.num_encs]
+            )
+        state['att_w_list'] = att_w_list
+        ey = torch.cat((ey, att_c), dim=1)
+
+        z_list, c_list = self.rnn_forward(ey, z_prev, c_prev)
+        state['z_prev'] = z_list
+        state['c_prev'] = c_list
+
+        if self.context_residual:
+            logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
+        else:
+            logits = self.output(self.dropout_dec[-1](z_list[-1]))
+        local_att_scores = F.log_softmax(logits, dim=1)
+
+        # TODO update return type in signature (doc)
+        # attention list needed for ctc
+        return state, att_w_list, local_att_scores
 
     def recognize_beam_batch(self, h, hlens, lpz, recog_args, char_list, rnnlm=None,
                              normalize_score=True, strm_idx=0, lang_ids=None):
@@ -698,13 +799,12 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
     @staticmethod
     def _index_select_lm_state(rnnlm_state, dim, vidx):
         if isinstance(rnnlm_state, dict):
-            new_state = {}
-            for k, v in rnnlm_state.items():
-                new_state[k] = [torch.index_select(vi, dim, vidx) for vi in v]
+            new_state = {
+                k:[torch.index_select(vi, dim, vidx) for vi in v]
+                for k, v in rnnlm_state.items()
+            }
         elif isinstance(rnnlm_state, list):
-            new_state = []
-            for i in vidx:
-                new_state.append(rnnlm_state[int(i)][:])
+            new_state = [rnnlm_state[int(i)][:] for i in vidx]
         return new_state
 
     # scorer interface methods
