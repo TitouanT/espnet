@@ -181,7 +181,7 @@ class BeamSearch:
         self.eos = model.eos
 
         # start of sequence
-        if replace_sos and recog_args.tgt_lang:
+        if self.replace_sos and recog_args.tgt_lang:
             self.sos = char_list.index(recog_args.tgt_lang)
         else:
             self.sos = model.sos
@@ -200,20 +200,17 @@ class BeamSearch:
         vy = find_first_tensor(h).new_zeros(1).long()
 
         # maxlen minlen calculation
-        # maxlen = np.amin([t.size(0) for t in find_all_tensors(h)])
         if self.recog_args.maxlenratio != 0:
             maxlen = int(self.recog_args.maxlenratio * maxlen)
         maxlen = max(1, maxlen)  # maxlen >= 1
         minlen = int(minlenratio * maxlen)
 
         # initialize hypothesis
-        hyp = Hypothesis(self.model.initial_decoding_state(h, strm_idx))
+        hyp = Hypothesis(self.model.initial_decoding_state(h, rnnlm, lpz, strm_idx))
         hyps = [hyp]
 
         hyp['score'] = 0.0
         hyp['yseq'] = [self.sos]
-        if rnnlm:
-            hyp['rnnlm_prev'] = None
 
         # initialize ctc
         has_ctc = (lpz is not None)

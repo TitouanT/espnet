@@ -258,10 +258,13 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
 
         return self.loss, acc, ppl
 
-    def initial_decoding_state(self, h, strm_idx=0):
+    def initial_decoding_state(self, h, rnnlm, strm_idx=0):
         # This is per hypotesis state
         att_idx = min(strm_idx, len(self.att) - 1)
         state = {'att_idx': att_idx, 'c_prev': None}
+
+        if rnnlm:
+            state['rnnlm_prev'] = None
 
         if self.dtype == 'lstm':
             state['c_prev'] = [self.zero_state(h[0].unsqueeze(0)) for _ in range(self.dlayers)]
@@ -329,7 +332,7 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         if self.num_encs == 1:
             return [h]
         maxlen = np.amin([h[idx].size(0) for idx in range(self.num_encs)])
-        return h
+        return h, maxlen
 
     def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
         """beam search implementation
@@ -345,7 +348,8 @@ class Decoder(torch.nn.Module, ScorerInterface, BeamableModel):
         :return: N-best decoding results
         :rtype: list of dicts
         """
-        bs = BeamSearch(self, recog_args, char_list, self.replace_sos)
+        model = self
+        bs = BeamSearch(model, recog_args, char_list, self.replace_sos)
         nbest_hyp = bs.recognize_beam(h, lpz, rnnlm=rnnlm, strm_idx=strm_idx)
         return nbest_hyp
 
