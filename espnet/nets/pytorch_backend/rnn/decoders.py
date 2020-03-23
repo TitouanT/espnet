@@ -256,6 +256,241 @@ class Decoder(torch.nn.Module, ScorerInterface):
 
         return self.loss, acc, ppl
 
+    def recognize_beam_generator(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
+        """beam search implementation
+
+        :param torch.Tensor h: encoder hidden state (T, eprojs)
+                                [in multi-encoder case, list of torch.Tensor, [(T1, eprojs), (T2, eprojs), ...] ]
+        :param torch.Tensor lpz: ctc log softmax output (T, odim)
+                                [in multi-encoder case, list of torch.Tensor, [(T1, odim), (T2, odim), ...] ]
+        :param Namespace recog_args: argument Namespace containing options
+        :param char_list: list of character strings
+        :param torch.nn.Module rnnlm: language module
+        :param int strm_idx: stream index for speaker parallel attention in multi-speaker case
+        :return: N-best decoding results
+        :rtype: list of dicts
+        """
+        # to support mutiple encoder asr mode, in single encoder mode, convert torch.Tensor to List of torch.Tensor
+        if self.num_encs == 1:
+            h = [h]
+            lpz = [lpz]
+        if self.num_encs > 1 and lpz is None:
+            lpz = [lpz] * self.num_encs
+
+        for idx in range(self.num_encs):
+            logging.info('Number of Encoder:{}; enc{}: input lengths: {}.'.format(self.num_encs, idx + 1, h[0].size(0)))
+        att_idx = min(strm_idx, len(self.att) - 1)
+        # initialization
+        c_list = [self.zero_state(h[0].unsqueeze(0))]
+        z_list = [self.zero_state(h[0].unsqueeze(0))]
+        for _ in six.moves.range(1, self.dlayers):
+            c_list.append(self.zero_state(h[0].unsqueeze(0)))
+            z_list.append(self.zero_state(h[0].unsqueeze(0)))
+        if self.num_encs == 1:
+            a = None
+            self.att[att_idx].reset()  # reset pre-computation of h
+        else:
+            a = [None] * (self.num_encs + 1)  # atts + han
+            att_w_list = [None] * (self.num_encs + 1)  # atts + han
+            att_c_list = [None] * (self.num_encs)  # atts
+            for idx in range(self.num_encs + 1):
+                self.att[idx].reset()  # reset pre-computation of h in atts and han
+
+        # search parms
+        beam = recog_args.beam_size
+        penalty = recog_args.penalty
+        ctc_weight = getattr(recog_args, "ctc_weight", False)  # for NMT
+
+        if lpz[0] is not None and self.num_encs > 1:
+            # weights-ctc, e.g. ctc_loss = w_1*ctc_1_loss + w_2 * ctc_2_loss + w_N * ctc_N_loss
+            weights_ctc_dec = recog_args.weights_ctc_dec / np.sum(recog_args.weights_ctc_dec)  # normalize
+            logging.info('ctc weights (decoding): ' + ' '.join([str(x) for x in weights_ctc_dec]))
+        else:
+            weights_ctc_dec = [1.0]
+
+        # preprate sos
+        if self.replace_sos and recog_args.tgt_lang:
+            y = char_list.index(recog_args.tgt_lang)
+        else:
+            y = self.sos
+        logging.info('<sos> index: ' + str(y))
+        logging.info('<sos> mark: ' + char_list[y])
+        vy = h[0].new_zeros(1).long()
+
+        maxlen = np.amin([h[idx].size(0) for idx in range(self.num_encs)])
+        if recog_args.maxlenratio != 0:
+            # maxlen >= 1
+            maxlen = max(1, int(recog_args.maxlenratio * maxlen))
+        minlen = int(recog_args.minlenratio * maxlen)
+        logging.info('max output length: ' + str(maxlen))
+        logging.info('min output length: ' + str(minlen))
+
+        # initialize hypothesis
+        if rnnlm:
+            hyp = {'score': 0.0, 'yseq': [y], 'c_prev': c_list,
+                   'z_prev': z_list, 'a_prev': a, 'rnnlm_prev': None}
+        else:
+            hyp = {'score': 0.0, 'yseq': [y], 'c_prev': c_list, 'z_prev': z_list, 'a_prev': a}
+        if lpz[0] is not None:
+            ctc_prefix_score = [CTCPrefixScore(lpz[idx].detach().numpy(), 0, self.eos, np) for idx in
+                                range(self.num_encs)]
+            hyp['ctc_state_prev'] = [ctc_prefix_score[idx].initial_state() for idx in range(self.num_encs)]
+            hyp['ctc_score_prev'] = [0.0] * self.num_encs
+            if ctc_weight != 1.0:
+                # pre-pruning based on attention scores
+                ctc_beam = min(lpz[0].shape[-1], int(beam * CTC_SCORING_RATIO))
+            else:
+                ctc_beam = lpz[0].shape[-1]
+        hyps = [hyp]
+        ended_hyps = []
+
+        for i in six.moves.range(maxlen):
+            logging.debug('position ' + str(i))
+
+            hyps_best_kept = []
+            for hyp in hyps:
+                vy[0] = hyp['yseq'][i]
+                ey = self.dropout_emb(self.embed(vy))  # utt list (1) x zdim
+                if self.num_encs == 1:
+                    att_c, att_w = self.att[att_idx](h[0].unsqueeze(0), [h[0].size(0)],
+                                                     self.dropout_dec[0](hyp['z_prev'][0]), hyp['a_prev'])
+                else:
+                    for idx in range(self.num_encs):
+                        att_c_list[idx], att_w_list[idx] = self.att[idx](h[idx].unsqueeze(0), [h[idx].size(0)],
+                                                                         self.dropout_dec[0](hyp['z_prev'][0]),
+                                                                         hyp['a_prev'][idx])
+                    h_han = torch.stack(att_c_list, dim=1)
+                    att_c, att_w_list[self.num_encs] = self.att[self.num_encs](h_han, [self.num_encs],
+                                                                               self.dropout_dec[0](hyp['z_prev'][0]),
+                                                                               hyp['a_prev'][self.num_encs])
+                ey = torch.cat((ey, att_c), dim=1)  # utt(1) x (zdim + hdim)
+                z_list, c_list = self.rnn_forward(ey, z_list, c_list, hyp['z_prev'], hyp['c_prev'])
+
+                # get nbest local scores and their ids
+                if self.context_residual:
+                    logits = self.output(torch.cat((self.dropout_dec[-1](z_list[-1]), att_c), dim=-1))
+                else:
+                    logits = self.output(self.dropout_dec[-1](z_list[-1]))
+                local_att_scores = F.log_softmax(logits, dim=1)
+                if rnnlm:
+                    rnnlm_state, local_lm_scores = rnnlm.predict(hyp['rnnlm_prev'], vy)
+                    local_scores = local_att_scores + recog_args.lm_weight * local_lm_scores
+                else:
+                    local_scores = local_att_scores
+
+                if lpz[0] is not None:
+                    local_best_scores, local_best_ids = torch.topk(
+                        local_att_scores, ctc_beam, dim=1)
+                    ctc_scores, ctc_states = [None] * self.num_encs, [None] * self.num_encs
+                    for idx in range(self.num_encs):
+                        ctc_scores[idx], ctc_states[idx] = ctc_prefix_score[idx](
+                            hyp['yseq'], local_best_ids[0], hyp['ctc_state_prev'][idx])
+                    local_scores = \
+                        (1.0 - ctc_weight) * local_att_scores[:, local_best_ids[0]]
+                    if self.num_encs == 1:
+                        local_scores += ctc_weight * torch.from_numpy(ctc_scores[0] - hyp['ctc_score_prev'][0])
+                    else:
+                        for idx in range(self.num_encs):
+                            local_scores += ctc_weight * weights_ctc_dec[idx] * torch.from_numpy(
+                                ctc_scores[idx] - hyp['ctc_score_prev'][idx])
+                    if rnnlm:
+                        local_scores += recog_args.lm_weight * local_lm_scores[:, local_best_ids[0]]
+                    local_best_scores, joint_best_ids = torch.topk(local_scores, beam, dim=1)
+                    local_best_ids = local_best_ids[:, joint_best_ids[0]]
+
+					local_att_scores[:, local_best_ids[0]] = local_scores
+					local_scores = local_att_scores
+
+				def mark_hyp(hyp, j):
+                    new_hyp = {}
+                    # [:] is needed!
+                    new_hyp['z_prev'] = z_list[:]
+                    new_hyp['c_prev'] = c_list[:]
+                    if self.num_encs == 1:
+                        new_hyp['a_prev'] = att_w[:]
+                    else:
+                        new_hyp['a_prev'] = [att_w_list[idx][:] for idx in range(self.num_encs + 1)]
+                    if rnnlm:
+                        new_hyp['rnnlm_prev'] = rnnlm_state
+                    if lpz[0] is not None:
+                        new_hyp['ctc_state_prev'] = [ctc_states[idx][joint_best_ids[0, j]] for idx in
+                                                     range(self.num_encs)]
+                        new_hyp['ctc_score_prev'] = [ctc_scores[idx][joint_best_ids[0, j]] for idx in
+                                                     range(self.num_encs)]
+					return new_hyp
+
+				hyps_best_kept = yield(local_scores, mark_hyps)
+				# external function that keeps only the best hypothesis based on local_scores
+
+				# TODO: see if joint_best_ids would need to be updated and if ctc_states/scores needs to be updated
+
+            # sort and get nbest
+            hyps = hyps_best_kept
+            logging.debug('number of pruned hypotheses: ' + str(len(hyps)))
+            logging.debug(
+                'best hypo: ' + ''.join([char_list[int(x)] for x in hyps[0]['yseq'][1:]]))
+
+            # add eos in the final loop to avoid that there are no ended hyps
+            if i == maxlen - 1:
+                logging.info('adding <eos> in the last position in the loop')
+                for hyp in hyps:
+                    hyp['yseq'].append(self.eos)
+
+            # add ended hypotheses to a final list, and removed them from current hypotheses
+            # (this will be a problem, number of hyps < beam)
+            remained_hyps = []
+            for hyp in hyps:
+                if hyp['yseq'][-1] == self.eos:
+                    # only store the sequence that has more than minlen outputs
+                    # also add penalty
+                    if len(hyp['yseq']) > minlen:
+                        hyp['score'] += (i + 1) * penalty
+                        if rnnlm:  # Word LM needs to add final <eos> score
+                            hyp['score'] += recog_args.lm_weight * rnnlm.final(
+                                hyp['rnnlm_prev'])
+                        ended_hyps.append(hyp)
+                else:
+                    remained_hyps.append(hyp)
+
+            # end detection
+            if end_detect(ended_hyps, i) and recog_args.maxlenratio == 0.0:
+                logging.info('end detected at %d', i)
+                break
+
+            hyps = remained_hyps
+            if len(hyps) > 0:
+                logging.debug('remaining hypotheses: ' + str(len(hyps)))
+            else:
+                logging.info('no hypothesis. Finish decoding.')
+                break
+
+            for hyp in hyps:
+                logging.debug(
+                    'hypo: ' + ''.join([char_list[int(x)] for x in hyp['yseq'][1:]]))
+
+            logging.debug('number of ended hypotheses: ' + str(len(ended_hyps)))
+
+        nbest_hyps = sorted(
+            ended_hyps, key=lambda x: x['score'], reverse=True)[:min(len(ended_hyps), recog_args.nbest)]
+
+        # check number of hypotheses
+        if len(nbest_hyps) == 0:
+            logging.warning('there is no N-best results, perform recognition again with smaller minlenratio.')
+            # should copy because Namespace will be overwritten globally
+            recog_args = Namespace(**vars(recog_args))
+            recog_args.minlenratio = max(0.0, recog_args.minlenratio - 0.1)
+            if self.num_encs == 1:
+                return self.recognize_beam(h[0], lpz[0], recog_args, char_list, rnnlm)
+            else:
+                return self.recognize_beam(h, lpz, recog_args, char_list, rnnlm)
+
+        logging.info('total log probability: ' + str(nbest_hyps[0]['score']))
+        logging.info('normalized log probability: ' + str(nbest_hyps[0]['score'] / len(nbest_hyps[0]['yseq'])))
+
+        # remove sos
+        return nbest_hyps
+
+
     def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None, strm_idx=0):
         """beam search implementation
 
